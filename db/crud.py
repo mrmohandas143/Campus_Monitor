@@ -152,67 +152,75 @@ def log_attendance(
     conn: sqlite3.Connection,
     person_id: int,
     confidence: float,
-    cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
+    period_name: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """
-    Log an attendance event, respecting the cooldown window.
+    Log an attendance event using period-based deduplication.
 
-    If the same person was already logged within `cooldown_seconds`,
-    this call is a no-op (returns False).
+    A person is logged **at most once per period per day**.  If
+    ``period_name`` is None (outside all class periods), the event is
+    silently skipped.
 
     Args:
-        conn:             Open database connection.
-        person_id:        ID from persons table.
-        confidence:       Cosine similarity score from recognizer.
-        cooldown_seconds: Minimum gap between records for the same person.
+        conn:        Open database connection.
+        person_id:   ID from the persons table.
+        confidence:  Cosine similarity score from the recognizer.
+        period_name: Name of the current class period (e.g. "Period 1"),
+                     or None when outside all periods.
 
     Returns:
-        Tuple (logged: bool, reason: str).
-        logged=True  → new record inserted.
-        logged=False → within cooldown, record skipped.
+        ``(True, reason)``  when a new row is inserted.
+        ``(False, reason)`` when skipped (outside period or already logged).
     """
-    today = date.today().isoformat()
+    if period_name is None:
+        return False, "Outside class periods — not logged"
+
+    today   = date.today().isoformat()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Check cooldown: was this person logged in the last N seconds?
-    recent = conn.execute(
+    # Was this person already logged in this period today?
+    existing = conn.execute(
         """
-        SELECT timestamp FROM attendance
-        WHERE person_id=?
-          AND session_date=?
-        ORDER BY timestamp DESC
+        SELECT id FROM attendance
+        WHERE person_id   = ?
+          AND session_date = ?
+          AND period_name  = ?
         LIMIT 1
         """,
-        (person_id, today),
+        (person_id, today, period_name),
     ).fetchone()
 
-    if recent:
-        last_ts = datetime.strptime(recent["timestamp"], "%Y-%m-%d %H:%M:%S")
-        elapsed = (datetime.now() - last_ts).total_seconds()
-        if elapsed < cooldown_seconds:
-            return False, f"Cooldown active ({elapsed:.0f}s / {cooldown_seconds}s)"
+    if existing:
+        return False, f"Already logged in {period_name}"
 
     with conn:
         conn.execute(
-            "INSERT INTO attendance (person_id, timestamp, confidence, session_date) "
-            "VALUES (?, ?, ?, ?)",
-            (person_id, now_str, confidence, today),
+            "INSERT INTO attendance "
+            "(person_id, timestamp, confidence, session_date, period_name) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (person_id, now_str, confidence, today, period_name),
         )
 
-    logger.debug("Attendance logged: person_id=%d  confidence=%.3f", person_id, confidence)
-    return True, "Logged"
+    logger.debug(
+        "Attendance logged: person_id=%d  period=%s  confidence=%.3f",
+        person_id, period_name, confidence,
+    )
+    return True, f"Logged in {period_name}"
 
 
 def log_unknown(conn: sqlite3.Connection) -> None:
-    """Log an unrecognized person (person_id=NULL)."""
-    today = date.today().isoformat()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with conn:
-        conn.execute(
-            "INSERT INTO attendance (person_id, timestamp, confidence, session_date) "
-            "VALUES (NULL, ?, NULL, ?)",
-            (now_str, today),
-        )
+    """Deprecated stub — unknown persons are now auto-registered via the engine."""
+    logger.warning("log_unknown() called but unknown persons are now auto-registered.")
+
+
+def log_unknown_with_cooldown(
+    conn: sqlite3.Connection,
+    cooldown_seconds: int = 60,
+    snapshot_path: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Deprecated stub — unknown persons are now auto-registered via the engine."""
+    logger.warning("log_unknown_with_cooldown() called but unknown persons are now auto-registered.")
+    return False, "Deprecated — use engine auto-registration"
 
 
 # ---------------------------------------------------------------------------
@@ -226,19 +234,21 @@ def get_attendance_for_date(
     Fetch attendance records for a given date (default: today).
 
     Returns:
-        List of dicts: {attendance_id, name, reg_no, timestamp, confidence, session_date}
-        Unknown persons appear with name='Unknown', reg_no=''.
+        List of dicts: {attendance_id, name, reg_no, timestamp, confidence,
+                        session_date, period_name}
+        Auto-registered unknowns appear with their generated name/reg_no.
     """
     target_date = session_date or date.today().isoformat()
     rows = conn.execute(
         """
         SELECT
-            a.id         AS attendance_id,
-            COALESCE(p.name, 'Unknown')   AS name,
+            a.id           AS attendance_id,
+            COALESCE(p.name,   'Unknown') AS name,
             COALESCE(p.reg_no, '')        AS reg_no,
             a.timestamp,
             a.confidence,
-            a.session_date
+            a.session_date,
+            a.period_name
         FROM attendance a
         LEFT JOIN persons p ON a.person_id = p.id
         WHERE a.session_date = ?
@@ -259,12 +269,13 @@ def get_attendance_range(
     rows = conn.execute(
         """
         SELECT
-            a.id         AS attendance_id,
-            COALESCE(p.name, 'Unknown')   AS name,
+            a.id           AS attendance_id,
+            COALESCE(p.name,   'Unknown') AS name,
             COALESCE(p.reg_no, '')        AS reg_no,
             a.timestamp,
             a.confidence,
-            a.session_date
+            a.session_date,
+            a.period_name
         FROM attendance a
         LEFT JOIN persons p ON a.person_id = p.id
         WHERE a.session_date BETWEEN ? AND ?
@@ -285,12 +296,13 @@ def get_daily_summary(
 
     Returns:
         {date, total_present, total_unknown, records: [...]}
+        ``total_unknown`` counts auto-registered unknown persons (reg_no LIKE 'UNK_%').
     """
     target_date = session_date or date.today().isoformat()
     records = get_attendance_for_date(conn, target_date)
 
-    known = [r for r in records if r["name"] != "Unknown"]
-    unknown = [r for r in records if r["name"] == "Unknown"]
+    unknown = [r for r in records if r["reg_no"].startswith("UNK_")]
+    known   = [r for r in records if not r["reg_no"].startswith("UNK_")]
 
     # Deduplicate by reg_no (first appearance = arrival time)
     seen = set()
@@ -306,3 +318,64 @@ def get_daily_summary(
         "total_unknown": len(unknown),
         "records": unique_known,
     }
+
+
+def get_unknown_alerts_for_date(
+    conn: sqlite3.Connection,
+    session_date: Optional[str] = None,
+) -> List[Dict]:
+    """Fetch auto-registered unknown person records for a given date.
+
+    Unknown persons are identified by ``reg_no LIKE 'UNK_%'``.
+
+    Returns:
+        List of dicts: {attendance_id, name, reg_no, timestamp, session_date,
+                        period_name, snapshot_path}
+    """
+    target_date = session_date or date.today().isoformat()
+    rows = conn.execute(
+        """
+        SELECT
+            a.id           AS attendance_id,
+            p.name,
+            p.reg_no,
+            a.timestamp,
+            a.session_date,
+            a.period_name,
+            p.face_path    AS snapshot_path
+        FROM attendance a
+        JOIN persons p ON a.person_id = p.id
+        WHERE p.reg_no LIKE 'UNK_%'
+          AND a.session_date = ?
+        ORDER BY a.timestamp ASC
+        """,
+        (target_date,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_unknown_alerts_range(
+    conn: sqlite3.Connection,
+    start_date: str,
+    end_date: str,
+) -> List[Dict]:
+    """Fetch auto-registered unknown person records between start_date and end_date (inclusive)."""
+    rows = conn.execute(
+        """
+        SELECT
+            a.id           AS attendance_id,
+            p.name,
+            p.reg_no,
+            a.timestamp,
+            a.session_date,
+            a.period_name,
+            p.face_path    AS snapshot_path
+        FROM attendance a
+        JOIN persons p ON a.person_id = p.id
+        WHERE p.reg_no LIKE 'UNK_%'
+          AND a.session_date BETWEEN ? AND ?
+        ORDER BY a.session_date ASC, a.timestamp ASC
+        """,
+        (start_date, end_date),
+    ).fetchall()
+    return [dict(row) for row in rows]

@@ -41,12 +41,22 @@ CREATE TABLE IF NOT EXISTS persons (
 # session_date is stored as a plain TEXT column and set explicitly in crud.py.
 _CREATE_ATTENDANCE = """
 CREATE TABLE IF NOT EXISTS attendance (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    person_id    INTEGER REFERENCES persons(id) ON DELETE SET NULL,
-    timestamp    TEXT DEFAULT (datetime('now', 'localtime')),
-    confidence   REAL,
-    session_date TEXT
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id     INTEGER REFERENCES persons(id) ON DELETE SET NULL,
+    timestamp     TEXT DEFAULT (datetime('now', 'localtime')),
+    confidence    REAL,
+    session_date  TEXT,
+    snapshot_path TEXT,
+    period_name   TEXT
 );
+"""
+
+# Migrations for databases created before this version
+_MIGRATE_ATTENDANCE_SNAPSHOT = """
+ALTER TABLE attendance ADD COLUMN snapshot_path TEXT;
+"""
+_MIGRATE_ATTENDANCE_PERIOD = """
+ALTER TABLE attendance ADD COLUMN period_name TEXT;
 """
 
 _CREATE_INDEXES = [
@@ -97,5 +107,14 @@ def init_db(db_path: Optional[str] = None) -> sqlite3.Connection:
         conn.execute(_CREATE_ATTENDANCE)
         for idx_sql in _CREATE_INDEXES:
             conn.execute(idx_sql)
+        # Migrations for older database versions
+        try:
+            conn.execute(_MIGRATE_ATTENDANCE_SNAPSHOT)
+        except Exception:
+            pass  # Column already exists
+        try:
+            conn.execute(_MIGRATE_ATTENDANCE_PERIOD)
+        except Exception:
+            pass  # Column already exists
     logger.info("Database initialized at %s", db_path or DEFAULT_DB_PATH)
     return conn

@@ -1,0 +1,122 @@
+# =============================================================================
+# Campus Monitor — .gitignore
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.Python
+pip-wheel-metadata/
+*.whl
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+ENV/
+
+# Distribution / packaging
+MANIFEST
+.installed.cfg
+
+# -----------------------------------------------------------------------------
+# Project runtime data — never commit
+# -----------------------------------------------------------------------------
+
+# SQLite database (contains face embeddings + attendance records)
+data/attendance.db
+data/attendance.db-wal
+data/attendance.db-shm
+
+# Exported Excel attendance sheets
+data/exports/*
+*.xlsx
+*.xls
+
+# -----------------------------------------------------------------------------
+# ML Models — large binary files, download via scripts/download_models.py
+# -----------------------------------------------------------------------------
+models/**/*.onnx
+models/**/*.caffemodel
+models/**/*.prototxt
+models/**/*.pb
+models/**/*.tflite
+models/**/*.weights
+
+# Preserve the directory structure so download_models.py works
+!models/embedder/
+!models/face_detector/
+
+# -----------------------------------------------------------------------------
+# Logs
+# -----------------------------------------------------------------------------
+*.log
+*.log.*
+logs/
+log/
+
+# -----------------------------------------------------------------------------
+# IDE / Editor
+# -----------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-workspace
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# -----------------------------------------------------------------------------
+# OS generated files
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# -----------------------------------------------------------------------------
+# Testing artifacts
+# -----------------------------------------------------------------------------
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+test-results/
+
+# -----------------------------------------------------------------------------
+# Build / temp files
+# -----------------------------------------------------------------------------
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# -----------------------------------------------------------------------------
+# Antigravity IDE build scratch (not project code)
+# -----------------------------------------------------------------------------
+antigravity_build_prompt.md
+.agents/

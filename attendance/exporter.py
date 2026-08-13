@@ -50,13 +50,14 @@ _LEFT   = Alignment(horizontal="left",   vertical="center")
 # Column definitions
 # ---------------------------------------------------------------------------
 _COLUMNS = [
-    ("S.No",         8),
-    ("Name",         24),
-    ("Reg No",       14),
-    ("Date",         13),
-    ("Time",         10),
-    ("Confidence",   13),
-    ("Status",       12),
+    ("S.No",       8),
+    ("Name",      24),
+    ("Reg No",    14),
+    ("Date",      13),
+    ("Period",    12),
+    ("Time",      10),
+    ("Confidence",13),
+    ("Status",    12),
 ]
 
 
@@ -131,8 +132,10 @@ def _write_excel(
     ws = wb.active
     ws.title = "Attendance"
 
+    last_col = get_column_letter(len(_COLUMNS))
+
     # -- Title row --
-    ws.merge_cells("A1:G1")
+    ws.merge_cells(f"A1:{last_col}1")
     title_cell = ws["A1"]
     title_cell.value = title
     title_cell.font = Font(name="Calibri", bold=True, size=14, color="1F3864")
@@ -140,7 +143,7 @@ def _write_excel(
     ws.row_dimensions[1].height = 28
 
     # -- Generated timestamp --
-    ws.merge_cells("A2:G2")
+    ws.merge_cells(f"A2:{last_col}2")
     ts_cell = ws["A2"]
     ts_cell.value = f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     ts_cell.font = Font(name="Calibri", italic=True, size=9, color="808080")
@@ -148,11 +151,11 @@ def _write_excel(
     ws.row_dimensions[2].height = 16
 
     # -- Summary row --
-    known_records = [r for r in records if r["name"] != "Unknown"]
+    known_records = [r for r in records if not r.get("reg_no", "").startswith("UNK_")]
     unique_present = len({r["reg_no"] for r in known_records if r["reg_no"]})
-    unknown_count  = sum(1 for r in records if r["name"] == "Unknown")
+    unknown_count  = sum(1 for r in records if r.get("reg_no", "").startswith("UNK_"))
 
-    ws.merge_cells("A3:G3")
+    ws.merge_cells(f"A3:{last_col}3")
     summary_cell = ws["A3"]
     summary_cell.value = (
         f"Total Present: {unique_present}   |   Unknown Detections: {unknown_count}"
@@ -177,8 +180,8 @@ def _write_excel(
 
     # -- Data rows --
     for row_offset, record in enumerate(records):
-        data_row = header_row + 1 + row_offset
-        is_unknown = record["name"] == "Unknown"
+        data_row   = header_row + 1 + row_offset
+        is_unknown = record.get("reg_no", "").startswith("UNK_")
 
         # Parse timestamp
         try:
@@ -190,14 +193,16 @@ def _write_excel(
             time_str = record.get("timestamp", "")
 
         confidence = record.get("confidence")
-        conf_str = f"{confidence:.3f}" if confidence is not None else "—"
-        status = "Unknown" if is_unknown else "Present"
+        conf_str   = f"{confidence:.3f}" if confidence is not None else "—"
+        period_str = record.get("period_name") or "—"
+        status     = "Unknown" if is_unknown else "Present"
 
         row_data = [
             row_offset + 1,           # S.No
             record["name"],           # Name
             record["reg_no"] or "—",  # Reg No
             date_str,                 # Date
+            period_str,               # Period
             time_str,                 # Time
             conf_str,                 # Confidence
             status,                   # Status
@@ -213,7 +218,7 @@ def _write_excel(
 
             if is_unknown:
                 cell.font = _UNKNOWN_FONT
-            elif col_idx == 7:  # Status column
+            elif col_idx == 8:  # Status column (now col 8)
                 cell.font = _PRESENT_FONT
             else:
                 cell.font = _DEFAULT_FONT

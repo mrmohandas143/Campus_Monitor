@@ -41,6 +41,8 @@ import cv2
 
 from attendance.engine import AttendanceEngine
 from attendance.exporter import export_daily, export_range
+from attendance.alerts import sound_alert, console_alert, export_alerts
+from attendance.periods import period_label
 from db.schema import init_db
 from db import crud
 
@@ -176,30 +178,30 @@ def cmd_register(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 def cmd_monitor(args: argparse.Namespace) -> int:
     """Live camera loop — detect faces, recognize, mark attendance."""
-    conn = init_db(args.db)
-    engine = AttendanceEngine(conn, use_cuda=args.cuda, cooldown_seconds=args.cooldown)
-    n = engine.load_gallery()
+    conn   = init_db(args.db)
+    engine = AttendanceEngine(conn, use_cuda=args.cuda)
+    n      = engine.load_gallery()
 
     if n == 0:
-        print(_y("[WARN] No registered persons in gallery. All faces will be 'Unknown'."))
-        print("       Run:  python cli/main.py register --name NAME --reg-no REG_NO\n")
+        print(_y("[WARN] Gallery is empty. Unknown faces will be auto-registered."))
+        print("       Use  python cli/main.py register --name NAME --reg-no REG_NO\n")
 
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
         print(_r(f"[ERROR] Cannot open camera index {args.camera}"))
         return 1
 
-    # Optional resolution
     if args.width:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  args.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height or 480)
 
     print(_b(f"\n  [MONITOR] Starting camera {args.camera}"))
-    print(f"  Gallery: {n} person(s)  |  Cooldown: {args.cooldown}s")
+    print(f"  Gallery: {n} person(s)  |  Attendance: period-based (once per class period)")
     print(f"  Press Q or ESC to stop.\n")
 
-    frame_count = 0
-    process_every = args.every  # process every Nth frame for performance
+    frame_count   = 0
+    process_every = args.every
+    alert_frames  = 0   # remaining frames to show alert overlay
 
     while True:
         ret, frame = cap.read()
@@ -216,32 +218,58 @@ def cmd_monitor(args: argparse.Namespace) -> int:
             for res in results:
                 x1, y1, x2, y2 = res["bbox"]
                 matched = res["matched"]
+                is_new_unknown = res.get("alert", False)
 
-                # Box color: green=matched, red=unknown
-                color = (0, 200, 0) if matched else (0, 0, 220)
+                # Box color: green=known, orange=new-unknown auto-registered, red=unknown
+                if is_new_unknown:
+                    color = (0, 128, 255)   # orange for newly auto-registered
+                elif matched:
+                    color = (0, 200, 0)     # green for known
+                else:
+                    color = (0, 0, 220)     # red fallback
+
                 cv2.rectangle(display, (x1, y1), (x2, y2), color, 2)
 
-                label = f"{res['name']}"
-                if matched:
+                label = res["name"]
+                if matched and not is_new_unknown:
                     label += f" {res['confidence']:.2f}"
                 if res.get("logged"):
-                    label += " [logged]"
+                    label += " [✓]"
 
-                # Label background
                 (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
                 cv2.rectangle(display, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
                 cv2.putText(display, label, (x1 + 2, y1 - 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
-                if res.get("logged"):
-                    print(_g(f"  [LOGGED]  {res['name']:20s} {res['reg_no']:12s}  conf={res['confidence']:.3f}"))
-                elif matched and not res.get("logged"):
-                    print(f"  [SKIP]    {res['name']:20s} {res['reg_no']:12s}  {res.get('log_reason','')}")
+                period = res.get("period") or "(outside period)"
 
-        # HUD
-        hud = f"Gallery: {n}  |  Frame: {frame_count}  |  Q=quit"
+                if is_new_unknown:
+                    snap = res.get("snapshot_path")
+                    sound_alert()
+                    console_alert(snap)
+                    print(_r(f"  [AUTO-REGISTERED]  {res['name']:25s} {res['reg_no']}"))
+                    if snap:
+                        print(_r(f"  [FACE SAVED]       {snap}"))
+                    alert_frames = 60
+                elif matched and res.get("logged"):
+                    print(_g(f"  [LOGGED]  {res['name']:20s} {res['reg_no']:14s}  conf={res['confidence']:.3f}  {period}"))
+                elif matched:
+                    print(f"  [SKIP]    {res['name']:20s} {res['reg_no']:14s}  {res.get('log_reason', '')}")
+
+
+        # --- Alert overlay ---
+        if alert_frames > 0:
+            h, w = display.shape[:2]
+            cv2.rectangle(display, (0, 0), (w, 55), (0, 70, 200), -1)
+            cv2.putText(display, "!! NEW UNKNOWN PERSON AUTO-REGISTERED !!",
+                        (8, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
+            alert_frames -= 1
+
+        # --- HUD (period + frame counter) ---
+        cur_period = period_label()
+        hud = f"{cur_period}  |  Gallery: {n}  |  Frame: {frame_count}  |  Q=quit"
         cv2.putText(display, hud, (8, display.shape[0] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
         cv2.imshow("Campus Monitor", display)
 
         key = cv2.waitKey(1) & 0xFF
@@ -267,6 +295,33 @@ def cmd_export(args: argparse.Namespace) -> int:
         path = export_daily(conn, args.output, args.date)
 
     print(_g(f"  [OK] Exported → {path}"))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: export-alerts
+# ---------------------------------------------------------------------------
+def cmd_export_alerts(args: argparse.Namespace) -> int:
+    """Export unknown-person alert records to a red-themed Excel file."""
+    conn = init_db(args.db)
+
+    if args.start and args.end:
+        records = crud.get_unknown_alerts_range(conn, args.start, args.end)
+        label   = f"{args.start}_to_{args.end}"
+        title   = f"Unknown Person Alerts — {args.start} to {args.end}"
+    else:
+        from datetime import date as _date
+        target = args.date or _date.today().isoformat()
+        records = crud.get_unknown_alerts_for_date(conn, target)
+        label   = target
+        title   = f"Unknown Person Alerts — {target}"
+
+    if not records:
+        print(_y(f"  [INFO] No unknown-person alerts found for the requested period."))
+        return 0
+
+    path = export_alerts(records, args.output, label, title)
+    print(_g(f"  [OK] Alerts exported → {path}"))
     return 0
 
 
@@ -350,12 +405,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- monitor --
     p_mon = sub.add_parser("monitor", help="Run live attendance monitoring")
-    p_mon.add_argument("--camera",   type=int,   default=0,   help="Camera index")
-    p_mon.add_argument("--cooldown", type=int,   default=300, help="Seconds between duplicate logs")
-    p_mon.add_argument("--every",    type=int,   default=3,   help="Process every Nth frame")
-    p_mon.add_argument("--width",    type=int,   default=None,help="Camera capture width")
-    p_mon.add_argument("--height",   type=int,   default=None,help="Camera capture height")
-    p_mon.add_argument("--cuda",     action="store_true",     help="Use CUDA backend")
+    p_mon.add_argument("--camera", type=int,   default=0,    help="Camera index")
+    p_mon.add_argument("--every",  type=int,   default=3,    help="Process every Nth frame")
+    p_mon.add_argument("--width",  type=int,   default=None, help="Camera capture width")
+    p_mon.add_argument("--height", type=int,   default=None, help="Camera capture height")
+    p_mon.add_argument("--cuda",   action="store_true",      help="Use CUDA backend")
     p_mon.set_defaults(func=cmd_monitor)
 
     # -- export --
@@ -365,6 +419,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_exp.add_argument("--end",    default=None, help="End date for range export")
     p_exp.add_argument("--output", default=None, help="Output .xlsx path")
     p_exp.set_defaults(func=cmd_export)
+
+    # -- export-alerts --
+    p_eal = sub.add_parser("export-alerts", help="Export unknown-person alerts to Excel")
+    p_eal.add_argument("--date",   default=None, help="YYYY-MM-DD (default: today)")
+    p_eal.add_argument("--start",  default=None, help="Start date for range export")
+    p_eal.add_argument("--end",    default=None, help="End date for range export")
+    p_eal.add_argument("--output", default=None, help="Output .xlsx path")
+    p_eal.set_defaults(func=cmd_export_alerts)
 
     # -- list --
     p_lst = sub.add_parser("list", help="List all registered students")
