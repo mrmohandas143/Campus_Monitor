@@ -40,6 +40,9 @@ data/attendance.db
 data/attendance.db-wal
 data/attendance.db-shm
 
+# Alert snapshots (unknown-person detections — generated at runtime)
+data/alerts/
+
 # Exported Excel attendance sheets
 data/exports/*
 *.xlsx
