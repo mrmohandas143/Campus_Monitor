@@ -1,0 +1,7 @@
+# Windows development dependencies
+# DO NOT pip install these on Jetson Nano — use requirements_jetson.txt instead
+
+opencv-contrib-python>=4.5.4   # includes cv2.FaceDetectorYN and cv2.FaceRecognizerSF
+numpy>=1.19.0
+openpyxl>=3.0.0                # Excel export (Stage 4)
+requests>=2.25.0               # optional — only needed for scripts using requests

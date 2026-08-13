@@ -1,0 +1,6 @@
+# Jetson Nano dependencies
+# OpenCV is NOT listed here — JetPack provides a CUDA-enabled build.
+# Installing opencv-contrib-python via pip will BREAK CUDA acceleration.
+
+numpy>=1.19.0
+openpyxl>=3.0.0
