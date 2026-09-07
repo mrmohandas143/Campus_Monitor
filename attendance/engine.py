@@ -72,6 +72,10 @@ class AttendanceEngine:
         self.embedder        = FaceEmbedder(use_cuda=use_cuda)
         self.recognizer      = FaceRecognizer()
 
+        # In-memory cooldown tracking for unknown face snapshots
+        self._unknown_cooldown = 30.0  # seconds between alerts for the same unknown face
+        self._recent_unknowns: List[Tuple[np.ndarray, float]] = []
+
         logger.info("AttendanceEngine initialized")
 
     def load_gallery(self) -> int:
@@ -149,7 +153,7 @@ class AttendanceEngine:
             snapshot_path: Optional[str] = None
 
             if rec["matched"]:
-                # --- Known person: log once per period ---
+                # --- Known person: log attendance (records in-time, updates out-time on repeat) ---
                 logged, log_reason = crud.log_attendance(
                     self._conn,
                     person_id=rec["person_id"],
@@ -157,34 +161,22 @@ class AttendanceEngine:
                     period_name=period_name,
                 )
             else:
-                # --- Unknown person: auto-register then log ---
-                new_id, new_name, new_reg_no, snap = self._auto_register_unknown(
-                    frame, faces[i], embeddings[i]
-                )
-                if new_id is not None:
-                    alert         = True
+                # --- Unknown person: take picture and store locally; do NOT log to attendance/excel ---
+                is_new, snap = self._capture_unknown(frame, faces[i], embeddings[i])
+                if is_new and snap:
+                    alert = True
                     snapshot_path = snap
-                    # Reload gallery immediately so this face is known next frame
-                    self.load_gallery()
-                    # Update rec fields to reflect the newly registered person
-                    rec = {
-                        **rec,
-                        "name":      new_name,
-                        "reg_no":    new_reg_no,
-                        "person_id": new_id,
-                        "matched":   True,
-                    }
-                    logged, log_reason = crud.log_attendance(
-                        self._conn,
-                        person_id=new_id,
-                        confidence=0.0,
-                        period_name=period_name,
-                    )
-                    if not logged:
-                        # Even if outside a period, note as auto-registered
-                        log_reason = f"Auto-registered ({log_reason})"
+                    log_reason = "Unknown person (picture saved locally)"
                 else:
-                    log_reason = "Auto-registration failed"
+                    log_reason = "Unknown person (already captured)"
+
+                rec = {
+                    **rec,
+                    "name": "Unknown",
+                    "reg_no": "",
+                    "person_id": None,
+                    "matched": False,
+                }
 
             results.append({
                 "bbox":          bboxes[i],
@@ -204,6 +196,41 @@ class AttendanceEngine:
 
     # ------------------------------------------------------------------
     # Internal helpers
+    # ------------------------------------------------------------------
+    def _capture_unknown(
+        self,
+        frame:     np.ndarray,
+        face,
+        embedding: np.ndarray,
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Check cooldown, crop and save unknown face snapshot locally to data/alerts/.
+
+        Returns:
+            ``(is_new_unknown, snapshot_path)``
+        """
+        import time as _time
+        now = _time.time()
+        # Clean up entries older than cooldown
+        self._recent_unknowns = [
+            (emb, ts) for (emb, ts) in self._recent_unknowns
+            if (now - ts) < self._unknown_cooldown
+        ]
+
+        # Check if matched against any recent unknown embedding
+        for emb, _ in self._recent_unknowns:
+            sim = float(np.dot(embedding, emb) / (
+                np.linalg.norm(embedding) * np.linalg.norm(emb) + 1e-10
+            ))
+            if sim >= 0.363:
+                return False, None
+
+        # New unknown person: capture and save picture locally
+        ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        snap = self._save_face_crop(frame, face, filename=f"unknown_{ts_str}.jpg")
+        self._recent_unknowns.append((embedding, now))
+        logger.info("Saved picture of unknown person to %s", snap)
+        return True, snap
     # ------------------------------------------------------------------
     def _auto_register_unknown(
         self,

@@ -163,7 +163,7 @@ def cmd_register(args: argparse.Namespace) -> int:
     else:
         try:
             person_id = crud.register_person(conn, name, reg_no, avg_embedding, face_path)
-            print(_g(f"\n  [OK] Registered {name} ({reg_no})  →  DB id={person_id}"))
+            print(_g(f"\n  [OK] Registered {name} ({reg_no})  ->  DB id={person_id}"))
         except Exception as exc:
             print(_r(f"\n  [ERROR] {exc}"))
             return 1
@@ -247,22 +247,26 @@ def cmd_monitor(args: argparse.Namespace) -> int:
                     snap = res.get("snapshot_path")
                     sound_alert()
                     console_alert(snap)
-                    print(_r(f"  [AUTO-REGISTERED]  {res['name']:25s} {res['reg_no']}"))
+                    print(_r(f"  [UNKNOWN PERSON]   Detected (picture stored locally)"))
                     if snap:
-                        print(_r(f"  [FACE SAVED]       {snap}"))
+                        print(_r(f"  [PICTURE SAVED]    {snap}"))
                     alert_frames = 60
                 elif matched and res.get("logged"):
-                    print(_g(f"  [LOGGED]  {res['name']:20s} {res['reg_no']:14s}  conf={res['confidence']:.3f}  {period}"))
+                    print(_g(f"  [IN-TIME LOGGED]   {res['name']:20s} {res['reg_no']:14s}  conf={res['confidence']:.3f}  {period}"))
                 elif matched:
-                    print(f"  [SKIP]    {res['name']:20s} {res['reg_no']:14s}  {res.get('log_reason', '')}")
+                    reason = res.get("log_reason", "")
+                    if "Out-time" in reason:
+                        print(_c(f"  [OUT-TIME]         {res['name']:20s} {res['reg_no']:14s}  {reason}"))
+                    else:
+                        print(f"  [STATUS]           {res['name']:20s} {res['reg_no']:14s}  {reason}")
 
 
         # --- Alert overlay ---
         if alert_frames > 0:
             h, w = display.shape[:2]
             cv2.rectangle(display, (0, 0), (w, 55), (0, 70, 200), -1)
-            cv2.putText(display, "!! NEW UNKNOWN PERSON AUTO-REGISTERED !!",
-                        (8, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
+            cv2.putText(display, "!! UNKNOWN PERSON DETECTED — PICTURE SAVED !!",
+                        (8, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
             alert_frames -= 1
 
         # --- HUD (period + frame counter) ---
@@ -294,7 +298,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     else:
         path = export_daily(conn, args.output, args.date)
 
-    print(_g(f"  [OK] Exported → {path}"))
+    print(_g(f"  [OK] Exported -> {path}"))
     return 0
 
 
@@ -321,7 +325,7 @@ def cmd_export_alerts(args: argparse.Namespace) -> int:
         return 0
 
     path = export_alerts(records, args.output, label, title)
-    print(_g(f"  [OK] Alerts exported → {path}"))
+    print(_g(f"  [OK] Alerts exported -> {path}"))
     return 0
 
 
@@ -354,22 +358,40 @@ def cmd_report(args: argparse.Namespace) -> int:
     conn = init_db(args.db)
     summary = crud.get_daily_summary(conn, args.date)
 
+    inside_count = sum(1 for r in summary["records"] if not r.get("out_time"))
+
     print(_b(f"\n  Attendance Report — {summary['date']}"))
-    print("  " + "=" * 50)
+    print("  " + "=" * 55)
     print(f"  Present (unique): {_g(str(summary['total_present']))}")
+    print(f"  Persons Inside:   {_c(str(inside_count))}")
     print(f"  Unknown faces:    {_r(str(summary['total_unknown']))}")
     print()
 
     if summary["records"]:
-        print(f"  {'Name':<25}  {'Reg No':<14}  {'Time'}")
-        print("  " + "-" * 55)
+        print(f"  {'Name':<22}  {'Reg No':<14}  {'In Time':<10}  {'Out Time':<10}  {'Inside'}")
+        print("  " + "-" * 70)
         for r in summary["records"]:
             try:
                 from datetime import datetime as dt
-                t = dt.strptime(r["timestamp"], "%Y-%m-%d %H:%M:%S").strftime("%H:%M:%S")
+                in_t = dt.strptime(r["timestamp"], "%Y-%m-%d %H:%M:%S").strftime("%H:%M:%S")
             except Exception:
-                t = r["timestamp"]
-            print(f"  {r['name']:<25}  {r['reg_no']:<14}  {t}")
+                in_t = r.get("timestamp") or "—"
+
+            out_raw = r.get("out_time")
+            if out_raw:
+                try:
+                    from datetime import datetime as dt
+                    out_t = dt.strptime(out_raw, "%Y-%m-%d %H:%M:%S").strftime("%H:%M:%S")
+                except Exception:
+                    out_t = str(out_raw)
+                inside_str = "No"
+            else:
+                out_t = "—"
+                inside_str = "Yes"
+
+            print(f"  {r['name']:<22}  {r['reg_no']:<14}  {in_t:<10}  {out_t:<10}  {inside_str}")
+        print("  " + "-" * 70)
+        print(f"  Total Persons Inside: {_g(str(inside_count))}")
     else:
         print(_y("  No attendance records for this date."))
 

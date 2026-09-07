@@ -181,7 +181,7 @@ def log_attendance(
     # Was this person already logged in this period today?
     existing = conn.execute(
         """
-        SELECT id FROM attendance
+        SELECT id, timestamp, out_time FROM attendance
         WHERE person_id   = ?
           AND session_date = ?
           AND period_name  = ?
@@ -191,6 +191,37 @@ def log_attendance(
     ).fetchone()
 
     if existing:
+        existing_id = existing["id"]
+        in_time_str = existing["timestamp"]
+
+        # If the same person crosses the camera within 1 min (60s), do NOT set out_time
+        try:
+            in_dt  = datetime.strptime(in_time_str, "%Y-%m-%d %H:%M:%S")
+            now_dt = datetime.strptime(now_str, "%Y-%m-%d %H:%M:%S")
+            elapsed = (now_dt - in_dt).total_seconds()
+        except Exception:
+            elapsed = 0
+
+        if elapsed < 60:
+            logger.debug(
+                "Skipping out_time for person_id=%d: within 1 min (%.1fs) of in-time",
+                person_id, elapsed,
+            )
+            return False, f"Within 1 min of entry — out-time not set"
+
+        # Update out_time if time has progressed beyond 1 min and different from current out_time
+        if existing["out_time"] != now_str:
+            with conn:
+                conn.execute(
+                    "UPDATE attendance SET out_time = ? WHERE id = ?",
+                    (now_str, existing_id),
+                )
+            time_part = now_str.split()[1] if " " in now_str else now_str
+            logger.debug(
+                "Out-time updated: person_id=%d  period=%s  out_time=%s",
+                person_id, period_name, now_str,
+            )
+            return False, f"Out-time updated ({time_part})"
         return False, f"Already logged in {period_name}"
 
     with conn:
@@ -206,6 +237,63 @@ def log_attendance(
         person_id, period_name, confidence,
     )
     return True, f"Logged in {period_name}"
+
+
+def update_out_time(
+    conn: sqlite3.Connection,
+    person_id: int,
+    out_time: Optional[str] = None,
+    period_name: Optional[str] = None,
+    session_date: Optional[str] = None,
+) -> bool:
+    """
+    Update the out_time for a person's attendance record.
+
+    If period_name is given, updates the record for that period today (or session_date).
+    Otherwise updates the latest attendance record for the person on session_date (default: today).
+
+    Args:
+        conn:         Open database connection.
+        person_id:    ID from the persons table.
+        out_time:     Out-time string formatted as 'YYYY-MM-DD HH:MM:SS' (default: now).
+        period_name:  Specific period name, or None for latest record today.
+        session_date: YYYY-MM-DD date string (default: today).
+
+    Returns:
+        True if an attendance record was found and updated, False otherwise.
+    """
+    target_date = session_date or date.today().isoformat()
+    now_str = out_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if period_name:
+        row = conn.execute(
+            """
+            SELECT id FROM attendance
+            WHERE person_id = ? AND session_date = ? AND period_name = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (person_id, target_date, period_name),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT id FROM attendance
+            WHERE person_id = ? AND session_date = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (person_id, target_date),
+        ).fetchone()
+
+    if row is None:
+        return False
+
+    with conn:
+        conn.execute(
+            "UPDATE attendance SET out_time = ? WHERE id = ?",
+            (now_str, row["id"]),
+        )
+    logger.debug("Updated out_time for person_id=%d to %s", person_id, now_str)
+    return True
 
 
 def log_unknown(conn: sqlite3.Connection) -> None:
@@ -234,8 +322,8 @@ def get_attendance_for_date(
     Fetch attendance records for a given date (default: today).
 
     Returns:
-        List of dicts: {attendance_id, name, reg_no, timestamp, confidence,
-                        session_date, period_name}
+        List of dicts: {attendance_id, name, reg_no, timestamp, out_time,
+                        confidence, session_date, period_name}
         Auto-registered unknowns appear with their generated name/reg_no.
     """
     target_date = session_date or date.today().isoformat()
@@ -246,6 +334,7 @@ def get_attendance_for_date(
             COALESCE(p.name,   'Unknown') AS name,
             COALESCE(p.reg_no, '')        AS reg_no,
             a.timestamp,
+            a.out_time,
             a.confidence,
             a.session_date,
             a.period_name
@@ -273,6 +362,7 @@ def get_attendance_range(
             COALESCE(p.name,   'Unknown') AS name,
             COALESCE(p.reg_no, '')        AS reg_no,
             a.timestamp,
+            a.out_time,
             a.confidence,
             a.session_date,
             a.period_name
@@ -304,13 +394,17 @@ def get_daily_summary(
     unknown = [r for r in records if r["reg_no"].startswith("UNK_")]
     known   = [r for r in records if not r["reg_no"].startswith("UNK_")]
 
-    # Deduplicate by reg_no (first appearance = arrival time)
-    seen = set()
-    unique_known = []
+    # Deduplicate by reg_no (first appearance = arrival time, latest out_time)
+    seen = {}
     for r in known:
-        if r["reg_no"] not in seen:
-            seen.add(r["reg_no"])
-            unique_known.append(r)
+        reg = r["reg_no"]
+        if reg not in seen:
+            seen[reg] = dict(r)
+        else:
+            latest_time = r.get("out_time") or r.get("timestamp")
+            if latest_time:
+                seen[reg]["out_time"] = latest_time
+    unique_known = list(seen.values())
 
     return {
         "date": target_date,

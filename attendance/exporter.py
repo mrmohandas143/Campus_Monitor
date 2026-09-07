@@ -35,12 +35,23 @@ _EVEN_FILL     = PatternFill("solid", fgColor="DCE6F1")   # light blue
 _ODD_FILL      = PatternFill("solid", fgColor="FFFFFF")
 _PRESENT_FONT  = Font(name="Calibri", color="1E7B34", bold=True, size=10)   # green
 _UNKNOWN_FONT  = Font(name="Calibri", color="C00000", size=10)               # red
+_INSIDE_FONT   = Font(name="Calibri", color="1E7B34", bold=True, size=10)   # green
+_OUT_FONT      = Font(name="Calibri", color="595959", size=10)               # gray
+_TOTAL_FONT    = Font(name="Calibri", bold=True, size=11, color="1F3864")
+_TOTAL_COUNT   = Font(name="Calibri", bold=True, size=11, color="1E7B34")
+_TOTAL_FILL    = PatternFill("solid", fgColor="E9EEF4")
 _DEFAULT_FONT  = Font(name="Calibri", size=10)
 _THIN_BORDER   = Border(
     left=Side(style="thin", color="BFBFBF"),
     right=Side(style="thin", color="BFBFBF"),
     top=Side(style="thin", color="BFBFBF"),
     bottom=Side(style="thin", color="BFBFBF"),
+)
+_DOUBLE_BOTTOM = Border(
+    left=Side(style="thin", color="BFBFBF"),
+    right=Side(style="thin", color="BFBFBF"),
+    top=Side(style="thin", color="1F3864"),
+    bottom=Side(style="double", color="1F3864"),
 )
 _CENTER = Alignment(horizontal="center", vertical="center")
 _LEFT   = Alignment(horizontal="left",   vertical="center")
@@ -55,7 +66,9 @@ _COLUMNS = [
     ("Reg No",    14),
     ("Date",      13),
     ("Period",    12),
-    ("Time",      10),
+    ("In Time",   12),
+    ("Out Time",  12),
+    ("Inside",    10),
     ("Confidence",13),
     ("Status",    12),
 ]
@@ -128,6 +141,16 @@ def _write_excel(
 ) -> str:
     path = output_path or _default_path(label)
 
+    # Filter out unknown persons — do not add unknown person data to the Excel sheet
+    known_records = [
+        r for r in records
+        if not (
+            r.get("reg_no", "").startswith("UNK_")
+            or r.get("name", "").startswith("Unknown")
+            or not r.get("reg_no")
+        )
+    ]
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Attendance"
@@ -151,14 +174,13 @@ def _write_excel(
     ws.row_dimensions[2].height = 16
 
     # -- Summary row --
-    known_records = [r for r in records if not r.get("reg_no", "").startswith("UNK_")]
-    unique_present = len({r["reg_no"] for r in known_records if r["reg_no"]})
-    unknown_count  = sum(1 for r in records if r.get("reg_no", "").startswith("UNK_"))
+    unique_present = len({r["reg_no"] for r in known_records if r.get("reg_no")})
+    inside_count   = sum(1 for r in known_records if not r.get("out_time"))
 
     ws.merge_cells(f"A3:{last_col}3")
     summary_cell = ws["A3"]
     summary_cell.value = (
-        f"Total Present: {unique_present}   |   Unknown Detections: {unknown_count}"
+        f"Total Present (Unique): {unique_present}   |   Total Records: {len(known_records)}   |   Persons Inside: {inside_count}"
     )
     summary_cell.font = Font(name="Calibri", bold=True, size=10, color="1F3864")
     summary_cell.alignment = _CENTER
@@ -179,33 +201,48 @@ def _write_excel(
     ws.row_dimensions[header_row].height = 20
 
     # -- Data rows --
-    for row_offset, record in enumerate(records):
-        data_row   = header_row + 1 + row_offset
-        is_unknown = record.get("reg_no", "").startswith("UNK_")
+    for row_offset, record in enumerate(known_records):
+        data_row = header_row + 1 + row_offset
 
-        # Parse timestamp
+        # Parse in_time from timestamp
         try:
             ts = datetime.strptime(record["timestamp"], "%Y-%m-%d %H:%M:%S")
             date_str = ts.strftime("%d-%m-%Y")
-            time_str = ts.strftime("%H:%M:%S")
+            in_time_str = ts.strftime("%H:%M:%S")
         except Exception:
             date_str = record.get("session_date", "")
-            time_str = record.get("timestamp", "")
+            in_time_str = record.get("timestamp", "") or "—"
+
+        # Parse out_time
+        out_time_raw = record.get("out_time")
+        if out_time_raw:
+            try:
+                ots = datetime.strptime(out_time_raw, "%Y-%m-%d %H:%M:%S")
+                out_time_str = ots.strftime("%H:%M:%S")
+            except Exception:
+                out_time_str = str(out_time_raw)
+        else:
+            out_time_str = "—"
+
+        is_inside = (not out_time_raw) or (out_time_raw == "") or (out_time_str == "—")
+        inside_str = "Yes" if is_inside else "No"
 
         confidence = record.get("confidence")
         conf_str   = f"{confidence:.3f}" if confidence is not None else "—"
         period_str = record.get("period_name") or "—"
-        status     = "Unknown" if is_unknown else "Present"
+        status     = "Present"
 
         row_data = [
-            row_offset + 1,           # S.No
-            record["name"],           # Name
-            record["reg_no"] or "—",  # Reg No
-            date_str,                 # Date
-            period_str,               # Period
-            time_str,                 # Time
-            conf_str,                 # Confidence
-            status,                   # Status
+            row_offset + 1,           # S.No (col 1)
+            record["name"],           # Name (col 2)
+            record["reg_no"] or "—",  # Reg No (col 3)
+            date_str,                 # Date (col 4)
+            period_str,               # Period (col 5)
+            in_time_str,              # In Time (col 6)
+            out_time_str,             # Out Time (col 7)
+            inside_str,               # Inside (col 8)
+            conf_str,                 # Confidence (col 9)
+            status,                   # Status (col 10)
         ]
 
         fill = _EVEN_FILL if row_offset % 2 == 0 else _ODD_FILL
@@ -216,24 +253,43 @@ def _write_excel(
             cell.border = _THIN_BORDER
             cell.alignment = _CENTER if col_idx != 2 else _LEFT
 
-            if is_unknown:
-                cell.font = _UNKNOWN_FONT
-            elif col_idx == 8:  # Status column (now col 8)
+            if col_idx == 8:  # Inside column
+                cell.font = _INSIDE_FONT if is_inside else _OUT_FONT
+            elif col_idx == 10:  # Status column (col 10)
                 cell.font = _PRESENT_FONT
             else:
                 cell.font = _DEFAULT_FONT
 
         ws.row_dimensions[data_row].height = 16
 
+    # -- Total row at the end of the table showing count of persons inside --
+    total_row = header_row + len(known_records) + 1
+    ws.merge_cells(f"A{total_row}:G{total_row}")
+    total_label_cell = ws[f"A{total_row}"]
+    total_label_cell.value = "Total Persons Inside:"
+    total_label_cell.font = _TOTAL_FONT
+    total_label_cell.alignment = Alignment(horizontal="right", vertical="center")
+
+    count_cell = ws.cell(row=total_row, column=8, value=inside_count)
+    count_cell.font = _TOTAL_COUNT
+    count_cell.alignment = _CENTER
+
+    for col_idx in range(1, len(_COLUMNS) + 1):
+        c = ws.cell(row=total_row, column=col_idx)
+        c.fill = _TOTAL_FILL
+        c.border = _DOUBLE_BOTTOM
+
+    ws.row_dimensions[total_row].height = 22
+
     # -- Freeze header rows --
     ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
 
     # -- Auto-filter on header row --
     ws.auto_filter.ref = (
-        f"A{header_row}:{get_column_letter(len(_COLUMNS))}{header_row + len(records)}"
+        f"A{header_row}:{get_column_letter(len(_COLUMNS))}{header_row + len(known_records)}"
     )
 
     wb.save(path)
-    logger.info("Exported %d records to %s", len(records), path)
-    print(f"  Exported {len(records)} records -> {path}")
+    logger.info("Exported %d records to %s", len(known_records), path)
+    print(f"  Exported {len(known_records)} records -> {path}")
     return path
