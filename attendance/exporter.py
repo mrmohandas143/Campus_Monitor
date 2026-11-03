@@ -65,7 +65,6 @@ _COLUMNS = [
     ("Name",      24),
     ("Reg No",    14),
     ("Date",      13),
-    ("Period",    12),
     ("In Time",   12),
     ("Out Time",  12),
     ("Inside",    10),
@@ -180,16 +179,16 @@ def _write_excel(
     ws.merge_cells(f"A3:{last_col}3")
     summary_cell = ws["A3"]
     summary_cell.value = (
-        f"Total Present (Unique): {unique_present}   |   Total Records: {len(known_records)}   |   Persons Inside: {inside_count}"
+        f"Registered Students Present: {unique_present}   |   Currently Inside: {inside_count}"
     )
     summary_cell.font = Font(name="Calibri", bold=True, size=10, color="1F3864")
     summary_cell.alignment = _CENTER
     ws.row_dimensions[3].height = 18
 
-    # Blank separator
-    ws.row_dimensions[4].height = 6
+    # Blank row 4
+    ws.row_dimensions[4].height = 8
 
-    # -- Column headers (row 5) --
+    # -- Table headers (row 5) --
     header_row = 5
     for col_idx, (col_name, col_width) in enumerate(_COLUMNS, start=1):
         cell = ws.cell(row=header_row, column=col_idx, value=col_name)
@@ -229,7 +228,6 @@ def _write_excel(
 
         confidence = record.get("confidence")
         conf_str   = f"{confidence:.3f}" if confidence is not None else "—"
-        period_str = record.get("period_name") or "—"
         status     = "Present"
 
         row_data = [
@@ -237,12 +235,11 @@ def _write_excel(
             record["name"],           # Name (col 2)
             record["reg_no"] or "—",  # Reg No (col 3)
             date_str,                 # Date (col 4)
-            period_str,               # Period (col 5)
-            in_time_str,              # In Time (col 6)
-            out_time_str,             # Out Time (col 7)
-            inside_str,               # Inside (col 8)
-            conf_str,                 # Confidence (col 9)
-            status,                   # Status (col 10)
+            in_time_str,              # In Time (col 5)
+            out_time_str,             # Out Time (col 6)
+            inside_str,               # Inside (col 7)
+            conf_str,                 # Confidence (col 8)
+            status,                   # Status (col 9)
         ]
 
         fill = _EVEN_FILL if row_offset % 2 == 0 else _ODD_FILL
@@ -253,9 +250,9 @@ def _write_excel(
             cell.border = _THIN_BORDER
             cell.alignment = _CENTER if col_idx != 2 else _LEFT
 
-            if col_idx == 8:  # Inside column
+            if col_idx == 7:  # Inside column
                 cell.font = _INSIDE_FONT if is_inside else _OUT_FONT
-            elif col_idx == 10:  # Status column (col 10)
+            elif col_idx == 9:  # Status column
                 cell.font = _PRESENT_FONT
             else:
                 cell.font = _DEFAULT_FONT
@@ -264,13 +261,13 @@ def _write_excel(
 
     # -- Total row at the end of the table showing count of persons inside --
     total_row = header_row + len(known_records) + 1
-    ws.merge_cells(f"A{total_row}:G{total_row}")
+    ws.merge_cells(f"A{total_row}:F{total_row}")
     total_label_cell = ws[f"A{total_row}"]
     total_label_cell.value = "Total Persons Inside:"
     total_label_cell.font = _TOTAL_FONT
     total_label_cell.alignment = Alignment(horizontal="right", vertical="center")
 
-    count_cell = ws.cell(row=total_row, column=8, value=inside_count)
+    count_cell = ws.cell(row=total_row, column=7, value=inside_count)
     count_cell.font = _TOTAL_COUNT
     count_cell.alignment = _CENTER
 

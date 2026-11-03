@@ -155,62 +155,67 @@ def log_attendance(
     period_name: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """
-    Log an attendance event using period-based deduplication.
+    Log an attendance event for today's session with 1-minute entry guard:
 
-    A person is logged **at most once per period per day**.  If
-    ``period_name`` is None (outside all class periods), the event is
-    silently skipped.
+    - First sighting today: logs in-time (marked Inside).
+    - If someone enters the camera and again enters within 1 min:
+      it is NOT taken as having left and is NOT marked outside (remains Inside).
+    - If sighting occurs >= 60 seconds after entry:
+      it updates out-time (marked Outside).
+    - If a person who was marked outside re-crosses the camera later:
+      they are re-marked Inside.
 
     Args:
         conn:        Open database connection.
         person_id:   ID from the persons table.
         confidence:  Cosine similarity score from the recognizer.
-        period_name: Name of the current class period (e.g. "Period 1"),
-                     or None when outside all periods.
+        period_name: Kept for backwards compatibility (ignored).
 
     Returns:
-        ``(True, reason)``  when a new row is inserted.
-        ``(False, reason)`` when skipped (outside period or already logged).
+        ``(True, reason)``  when initial in-time or re-entry is logged.
+        ``(False, reason)`` when skipped within 1 min or out-time is updated.
     """
-    if period_name is None:
-        return False, "Outside class periods — not logged"
-
     today   = date.today().isoformat()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now     = datetime.now()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Was this person already logged in this period today?
+    # Was this person already logged today?
     existing = conn.execute(
         """
         SELECT id, timestamp, out_time FROM attendance
         WHERE person_id   = ?
           AND session_date = ?
-          AND period_name  = ?
+        ORDER BY id DESC
         LIMIT 1
         """,
-        (person_id, today, period_name),
+        (person_id, today),
     ).fetchone()
 
     if existing:
-        existing_id = existing["id"]
-        in_time_str = existing["timestamp"]
+        existing_id  = existing["id"]
+        in_time_str  = existing["timestamp"]
+        out_time_str = existing["out_time"]
 
-        # If the same person crosses the camera within 1 min (60s), do NOT set out_time
+        # Parse in-time from DB
         try:
-            in_dt  = datetime.strptime(in_time_str, "%Y-%m-%d %H:%M:%S")
-            now_dt = datetime.strptime(now_str, "%Y-%m-%d %H:%M:%S")
-            elapsed = (now_dt - in_dt).total_seconds()
+            in_dt = datetime.strptime(in_time_str, "%Y-%m-%d %H:%M:%S")
         except Exception:
-            elapsed = 0
+            in_dt = now
 
-        if elapsed < 60:
-            logger.debug(
-                "Skipping out_time for person_id=%d: within 1 min (%.1fs) of in-time",
-                person_id, elapsed,
-            )
-            return False, f"Within 1 min of entry — out-time not set"
+        # If person is currently INSIDE (out_time is None)
+        if not out_time_str:
+            elapsed = (now - in_dt).total_seconds()
 
-        # Update out_time if time has progressed beyond 1 min and different from current out_time
-        if existing["out_time"] != now_str:
+            # Rule: If someone enters the camera and again enters within 1 min (60s),
+            # it is NOT taken as he left and does NOT mark outside.
+            if elapsed < 60:
+                logger.debug(
+                    "Person person_id=%d entered again within 1 min (%.1fs). Still inside.",
+                    person_id, elapsed,
+                )
+                return False, f"Within 1 min of entry ({int(elapsed)}s) — still inside (not left)"
+
+            # Beyond 1 min: person is now leaving (marked outside with out_time)
             with conn:
                 conn.execute(
                     "UPDATE attendance SET out_time = ? WHERE id = ?",
@@ -218,25 +223,45 @@ def log_attendance(
                 )
             time_part = now_str.split()[1] if " " in now_str else now_str
             logger.debug(
-                "Out-time updated: person_id=%d  period=%s  out_time=%s",
-                person_id, period_name, now_str,
+                "Out-time updated: person_id=%d  out_time=%s",
+                person_id, now_str,
             )
             return False, f"Out-time updated ({time_part})"
-        return False, f"Already logged in {period_name}"
+        else:
+            # Person was marked outside (had out_time), but is now crossing camera again
+            try:
+                out_dt = datetime.strptime(out_time_str, "%Y-%m-%d %H:%M:%S")
+                elapsed_since_out = (now - out_dt).total_seconds()
+            except Exception:
+                elapsed_since_out = 999
 
+            if elapsed_since_out < 60:
+                return False, f"Within 1 min of exit ({int(elapsed_since_out)}s)"
+
+            # Re-entering the room: update in-time to now and clear out_time so they are marked INSIDE
+            with conn:
+                conn.execute(
+                    "UPDATE attendance SET timestamp = ?, out_time = NULL WHERE id = ?",
+                    (now_str, existing_id),
+                )
+            time_part = now_str.split()[1] if " " in now_str else now_str
+            logger.debug("Person %d re-entered at %s — marked inside", person_id, time_part)
+            return True, f"Re-entered at {time_part} (marked inside)"
+
+    # First entry today: record in-time and mark INSIDE
     with conn:
         conn.execute(
             "INSERT INTO attendance "
-            "(person_id, timestamp, confidence, session_date, period_name) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (person_id, now_str, confidence, today, period_name),
+            "(person_id, timestamp, confidence, session_date) "
+            "VALUES (?, ?, ?, ?)",
+            (person_id, now_str, confidence, today),
         )
 
     logger.debug(
-        "Attendance logged: person_id=%d  period=%s  confidence=%.3f",
-        person_id, period_name, confidence,
+        "Attendance logged: person_id=%d  confidence=%.3f",
+        person_id, confidence,
     )
-    return True, f"Logged in {period_name}"
+    return True, "Logged (Inside)"
 
 
 def update_out_time(
@@ -249,14 +274,13 @@ def update_out_time(
     """
     Update the out_time for a person's attendance record.
 
-    If period_name is given, updates the record for that period today (or session_date).
-    Otherwise updates the latest attendance record for the person on session_date (default: today).
+    Updates the latest attendance record for the person on session_date (default: today).
 
     Args:
         conn:         Open database connection.
         person_id:    ID from the persons table.
         out_time:     Out-time string formatted as 'YYYY-MM-DD HH:MM:SS' (default: now).
-        period_name:  Specific period name, or None for latest record today.
+        period_name:  Ignored (for backwards compatibility).
         session_date: YYYY-MM-DD date string (default: today).
 
     Returns:
@@ -265,24 +289,14 @@ def update_out_time(
     target_date = session_date or date.today().isoformat()
     now_str = out_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    if period_name:
-        row = conn.execute(
-            """
-            SELECT id FROM attendance
-            WHERE person_id = ? AND session_date = ? AND period_name = ?
-            ORDER BY id DESC LIMIT 1
-            """,
-            (person_id, target_date, period_name),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            """
-            SELECT id FROM attendance
-            WHERE person_id = ? AND session_date = ?
-            ORDER BY id DESC LIMIT 1
-            """,
-            (person_id, target_date),
-        ).fetchone()
+    row = conn.execute(
+        """
+        SELECT id FROM attendance
+        WHERE person_id = ? AND session_date = ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (person_id, target_date),
+    ).fetchone()
 
     if row is None:
         return False
@@ -323,8 +337,7 @@ def get_attendance_for_date(
 
     Returns:
         List of dicts: {attendance_id, name, reg_no, timestamp, out_time,
-                        confidence, session_date, period_name}
-        Auto-registered unknowns appear with their generated name/reg_no.
+                        confidence, session_date}
     """
     target_date = session_date or date.today().isoformat()
     rows = conn.execute(
@@ -336,8 +349,7 @@ def get_attendance_for_date(
             a.timestamp,
             a.out_time,
             a.confidence,
-            a.session_date,
-            a.period_name
+            a.session_date
         FROM attendance a
         LEFT JOIN persons p ON a.person_id = p.id
         WHERE a.session_date = ?
@@ -364,8 +376,7 @@ def get_attendance_range(
             a.timestamp,
             a.out_time,
             a.confidence,
-            a.session_date,
-            a.period_name
+            a.session_date
         FROM attendance a
         LEFT JOIN persons p ON a.person_id = p.id
         WHERE a.session_date BETWEEN ? AND ?
@@ -401,8 +412,11 @@ def get_daily_summary(
         if reg not in seen:
             seen[reg] = dict(r)
         else:
-            latest_time = r.get("out_time") or r.get("timestamp")
-            if latest_time:
+            latest_time = r.get("out_time")
+            # If any record for the student has out_time is None, they are currently inside!
+            if latest_time is None:
+                seen[reg]["out_time"] = None
+            elif seen[reg].get("out_time"):
                 seen[reg]["out_time"] = latest_time
     unique_known = list(seen.values())
 
@@ -424,7 +438,7 @@ def get_unknown_alerts_for_date(
 
     Returns:
         List of dicts: {attendance_id, name, reg_no, timestamp, session_date,
-                        period_name, snapshot_path}
+                        snapshot_path}
     """
     target_date = session_date or date.today().isoformat()
     rows = conn.execute(
@@ -435,7 +449,6 @@ def get_unknown_alerts_for_date(
             p.reg_no,
             a.timestamp,
             a.session_date,
-            a.period_name,
             p.face_path    AS snapshot_path
         FROM attendance a
         JOIN persons p ON a.person_id = p.id
@@ -462,7 +475,6 @@ def get_unknown_alerts_range(
             p.reg_no,
             a.timestamp,
             a.session_date,
-            a.period_name,
             p.face_path    AS snapshot_path
         FROM attendance a
         JOIN persons p ON a.person_id = p.id

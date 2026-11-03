@@ -39,9 +39,16 @@ MANIFEST
 data/attendance.db
 data/attendance.db-wal
 data/attendance.db-shm
+data/attendance.db*backup*
+data/*.backup*
+*.backup*
 
 # Alert snapshots (unknown-person detections — generated at runtime)
 data/alerts/
+
+# Registered face crops (biometric data — generated at registration)
+data/faces/*
+!data/faces/.gitkeep
 
 # Exported Excel attendance sheets
 data/exports/*

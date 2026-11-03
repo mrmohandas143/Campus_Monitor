@@ -42,7 +42,6 @@ import cv2
 from attendance.engine import AttendanceEngine
 from attendance.exporter import export_daily, export_range
 from attendance.alerts import sound_alert, console_alert, export_alerts
-from attendance.periods import period_label
 from db.schema import init_db
 from db import crud
 
@@ -196,7 +195,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height or 480)
 
     print(_b(f"\n  [MONITOR] Starting camera {args.camera}"))
-    print(f"  Gallery: {n} person(s)  |  Attendance: period-based (once per class period)")
+    print(f"  Gallery: {n} person(s)  |  Attendance: daily (in-time / out-time)")
     print(f"  Press Q or ESC to stop.\n")
 
     frame_count   = 0
@@ -234,14 +233,18 @@ def cmd_monitor(args: argparse.Namespace) -> int:
                 if matched and not is_new_unknown:
                     label += f" {res['confidence']:.2f}"
                 if res.get("logged"):
-                    label += " [✓]"
+                    label += " [IN ✓]"
+                elif matched:
+                    reason = res.get("log_reason", "")
+                    if "within 1 min" in reason.lower() or "still inside" in reason.lower() or "already logged" in reason.lower():
+                        label += " [INSIDE]"
+                    elif "out-time" in reason.lower():
+                        label += " [OUT]"
 
                 (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
                 cv2.rectangle(display, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
                 cv2.putText(display, label, (x1 + 2, y1 - 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
-
-                period = res.get("period") or "(outside period)"
 
                 if is_new_unknown:
                     snap = res.get("snapshot_path")
@@ -252,11 +255,13 @@ def cmd_monitor(args: argparse.Namespace) -> int:
                         print(_r(f"  [PICTURE SAVED]    {snap}"))
                     alert_frames = 60
                 elif matched and res.get("logged"):
-                    print(_g(f"  [IN-TIME LOGGED]   {res['name']:20s} {res['reg_no']:14s}  conf={res['confidence']:.3f}  {period}"))
+                    print(_g(f"  [IN-TIME LOGGED]   {res['name']:20s} {res['reg_no']:14s}  conf={res['confidence']:.3f}  [INSIDE]"))
                 elif matched:
                     reason = res.get("log_reason", "")
                     if "Out-time" in reason:
-                        print(_c(f"  [OUT-TIME]         {res['name']:20s} {res['reg_no']:14s}  {reason}"))
+                        print(_c(f"  [OUT-TIME]         {res['name']:20s} {res['reg_no']:14s}  {reason}  [OUTSIDE]"))
+                    elif "within 1 min" in reason.lower() or "still inside" in reason.lower():
+                        print(_g(f"  [STILL INSIDE]     {res['name']:20s} {res['reg_no']:14s}  {reason}"))
                     else:
                         print(f"  [STATUS]           {res['name']:20s} {res['reg_no']:14s}  {reason}")
 
@@ -269,9 +274,8 @@ def cmd_monitor(args: argparse.Namespace) -> int:
                         (8, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
             alert_frames -= 1
 
-        # --- HUD (period + frame counter) ---
-        cur_period = period_label()
-        hud = f"{cur_period}  |  Gallery: {n}  |  Frame: {frame_count}  |  Q=quit"
+        # --- HUD (gallery count + frame counter) ---
+        hud = f"Campus Monitor  |  Gallery: {n}  |  Frame: {frame_count}  |  Q=quit"
         cv2.putText(display, hud, (8, display.shape[0] - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
         cv2.imshow("Campus Monitor", display)
@@ -321,7 +325,7 @@ def cmd_export_alerts(args: argparse.Namespace) -> int:
         title   = f"Unknown Person Alerts — {target}"
 
     if not records:
-        print(_y(f"  [INFO] No unknown-person alerts found for the requested period."))
+        print(_y(f"  [INFO] No unknown-person alerts found for the requested date."))
         return 0
 
     path = export_alerts(records, args.output, label, title)

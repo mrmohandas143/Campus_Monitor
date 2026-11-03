@@ -47,7 +47,6 @@ CREATE TABLE IF NOT EXISTS attendance (
     confidence    REAL,
     session_date  TEXT,
     snapshot_path TEXT,
-    period_name   TEXT,
     out_time      TEXT
 );
 """
@@ -55,9 +54,6 @@ CREATE TABLE IF NOT EXISTS attendance (
 # Migrations for databases created before this version
 _MIGRATE_ATTENDANCE_SNAPSHOT = """
 ALTER TABLE attendance ADD COLUMN snapshot_path TEXT;
-"""
-_MIGRATE_ATTENDANCE_PERIOD = """
-ALTER TABLE attendance ADD COLUMN period_name TEXT;
 """
 _MIGRATE_ATTENDANCE_OUT_TIME = """
 ALTER TABLE attendance ADD COLUMN out_time TEXT;
@@ -117,12 +113,15 @@ def init_db(db_path: Optional[str] = None) -> sqlite3.Connection:
         except Exception:
             pass  # Column already exists
         try:
-            conn.execute(_MIGRATE_ATTENDANCE_PERIOD)
-        except Exception:
-            pass  # Column already exists
-        try:
             conn.execute(_MIGRATE_ATTENDANCE_OUT_TIME)
         except Exception:
             pass  # Column already exists
+        # Drop period_name column if present in existing database
+        try:
+            cols = [c[1] for c in conn.execute("PRAGMA table_info(attendance)").fetchall()]
+            if "period_name" in cols:
+                conn.execute("ALTER TABLE attendance DROP COLUMN period_name")
+        except Exception:
+            pass
     logger.info("Database initialized at %s", db_path or DEFAULT_DB_PATH)
     return conn

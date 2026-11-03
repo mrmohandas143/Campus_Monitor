@@ -1,12 +1,16 @@
 import sys
+import tempfile
+import os
 sys.path.insert(0, '.')
 
 from db.schema import init_db
 from db import crud
 import numpy as np
 
+tmp_db = os.path.join(tempfile.mkdtemp(), "smoke_test.db")
+
 print('[1] Initializing database...')
-conn = init_db()
+conn = init_db(tmp_db)
 print('    OK - tables created')
 
 print('[2] Registering test student...')
@@ -30,9 +34,9 @@ print('    Present=' + str(summary['total_present']) + '  Unknown=' + str(summar
 
 print('[5] Exporting to Excel...')
 from attendance.exporter import export_daily
-path = export_daily(conn)
+tmp_excel = os.path.join(tempfile.mkdtemp(), "smoke_test.xlsx")
+path = export_daily(conn, output_path=tmp_excel)
 
-import os
 size = os.path.getsize(path)
 print('    File size: ' + str(size) + ' bytes')
 

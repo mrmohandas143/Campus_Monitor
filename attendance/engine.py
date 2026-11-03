@@ -6,7 +6,7 @@ Orchestrates the full pipeline for one frame:
 
 Unknown persons are automatically registered in the database so that the
 same face will be recognised (and not re-alerted) on subsequent frames.
-Attendance is logged at most once per class period per person.
+Attendance is logged at most once per day per person (updating out-time on repeat).
 
 This is the single entry point called by the CLI monitor loop.
 It does NOT touch the camera — that is the CLI's responsibility.
@@ -25,7 +25,6 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from attendance.periods import get_current_period
 from core.detector import FaceDetector, PersonDetector
 from core.embedder import FaceEmbedder
 from core.recognizer import FaceRecognizer
@@ -45,7 +44,7 @@ class AttendanceEngine:
     ``Unknown_<timestamp>``, reg_no: ``UNK_<timestamp>``) so the camera
     will recognise the same person on the next frame and not alert again.
 
-    Attendance is logged at most **once per class period** per person.
+    Attendance is logged at most **once per day** per person.
 
     Usage::
 
@@ -95,13 +94,12 @@ class AttendanceEngine:
         Run the full pipeline on a single BGR frame.
 
         Steps:
-          1. Determine current class period
-          2. Detect persons (HOG) — for headcount
-          3. Detect faces (YuNet)
-          4. Embed each detected face (SFace)
-          5. Recognize each embedding against gallery
-          6a. Known person   → log attendance for current period (once per period)
-          6b. Unknown person → auto-register + reload gallery + alert + log attendance
+          1. Detect persons (HOG) — for headcount
+          2. Detect faces (YuNet)
+          3. Embed each detected face (SFace)
+          4. Recognize each embedding against gallery
+          5a. Known person   → log attendance (once per day, out-time update on repeat)
+          5b. Unknown person → alert + capture snapshot
 
         Args:
             frame: BGR image from cv2.VideoCapture.
@@ -120,29 +118,25 @@ class AttendanceEngine:
                 "log_reason"    : str,
                 "alert"         : bool,              # True when new unknown auto-registered
                 "snapshot_path" : str | None,        # face-crop path for new unknowns
-                "period"        : str | None,        # active period name, or None
+                "period"        : None,
               }
         """
         results = []
 
-        # Step 1: Determine active period
-        period      = get_current_period()
-        period_name = period["name"] if period else None
-
-        # Step 2: Person headcount (non-blocking — HOG may miss headshots)
+        # Step 1: Person headcount (non-blocking — HOG may miss headshots)
         persons = self.person_detector.detect(frame)
         if persons:
             logger.debug("Person headcount: %d", len(persons))
 
-        # Step 3: Face detection
+        # Step 2: Face detection
         faces = self.face_detector.detect(frame)
         if len(faces) == 0:
             return results
 
-        # Step 4: Embed all faces in one pass
+        # Step 3: Embed all faces in one pass
         embeddings = self.embedder.embed_batch(frame, faces)
 
-        # Step 5 + 6: Recognize and log
+        # Step 4 + 5: Recognize and log
         bboxes               = self.face_detector.bboxes(faces)
         recognition_results  = self.recognizer.recognize_batch(embeddings)
 
@@ -158,7 +152,6 @@ class AttendanceEngine:
                     self._conn,
                     person_id=rec["person_id"],
                     confidence=rec["confidence"],
-                    period_name=period_name,
                 )
             else:
                 # --- Unknown person: take picture and store locally; do NOT log to attendance/excel ---
@@ -189,7 +182,7 @@ class AttendanceEngine:
                 "log_reason":    log_reason,
                 "alert":         alert,
                 "snapshot_path": snapshot_path,
-                "period":        period_name,
+                "period":        None,
             })
 
         return results
@@ -231,6 +224,7 @@ class AttendanceEngine:
         self._recent_unknowns.append((embedding, now))
         logger.info("Saved picture of unknown person to %s", snap)
         return True, snap
+
     # ------------------------------------------------------------------
     def _auto_register_unknown(
         self,
